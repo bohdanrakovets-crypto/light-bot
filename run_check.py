@@ -21,8 +21,8 @@ from aiogram import Bot
 from aiogram.types import BufferedInputFile
 
 # --- НАЛАШТУВАННЯ ---
-BOT_TOKEN = os.getenv("8584275792:AAGbU5b6bu9qkAcGFnsh0WRLtwfmMv6Lx1Y")
-GROUP_ID = os.getenv("-1003575814720") 
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+GROUP_ID = os.getenv("GROUP_ID") 
 SITE_URL = "https://voe-poweron.inneti.net/schedule_queues"
 
 # На GitHub Actions tesseract вже встановлений в систему
