@@ -1,0 +1,44 @@
+name: Check Schedule
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'  # Запускати кожні 30 хв
+  workflow_dispatch:        # Кнопка для ручного запуску
+
+permissions:
+  contents: write
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tesseract-ocr libtesseract-dev
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install Libraries
+        run: |
+          pip install -r requirements.txt
+
+      - name: Run Bot
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          GROUP_ID: ${{ secrets.GROUP_ID }}
+        run: python run_check.py
+
+      - name: Save History
+        run: |
+          git config --global user.name "Bot"
+          git config --global user.email "bot@github.com"
+          git add state.json || true
+          git commit -m "update history" || true
+          git push
