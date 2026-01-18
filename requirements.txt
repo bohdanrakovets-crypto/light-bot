@@ -1,0 +1,7 @@
+aiogram==3.10.0
+requests
+numpy
+opencv-python-headless
+pytesseract
+selenium
+webdriver-manager
