@@ -2,7 +2,7 @@ name: Check Schedule
 
 on:
   schedule:
-    - cron: '*/30 * * * *'  # Запускати кожні 30 хв
+    - cron: '*/20 * * * *'  # Запускати кожні 20 хв
   workflow_dispatch:        # Кнопка для ручного запуску
 
 permissions:
