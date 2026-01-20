@@ -6,7 +6,6 @@ import re
 import requests
 import json
 import os
-import hashlib
 from datetime import datetime, date
 from io import BytesIO
 
@@ -35,49 +34,8 @@ STATE_FILE = "state.json"
 
 # --- ФУНКЦІЇ ---
 
-def extract_queue_pixels(img):
-    """
-    Вирізає ВУЗЬКУ безпечну смужку по центру рядка 3.1.
-    Ігнорує кордони та сусідні черги.
-    """
-    h, w, _ = img.shape
-    rows_total = 12
-    
-    # Координати блоків
-    top_y_start = int(h * 0.19)
-    top_y_end = int(h * 0.51)
-    
-    bottom_y_start = int(h * 0.58)
-    bottom_y_end = int(h * 0.90)
-
-    # Функція для отримання безпечного центру
-    def get_safe_strip(y_start, y_end):
-        block_h = y_end - y_start
-        row_h = block_h / rows_total
-        
-        # Знаходимо точний центр рядка черги 3.1
-        center_y = int(y_start + (TARGET_QUEUE_INDEX * row_h) + (row_h / 2))
-        
-        # Беремо лише +/- 3 пікселі від центру (разом 6 пікселів висоти)
-        # Це гарантує, що ми не зачепимо сусідів
-        safe_margin = 3
-        return img[center_y - safe_margin : center_y + safe_margin, :]
-
-    # 1. Вирізаємо вузьку смужку зверху
-    strip_top = get_safe_strip(top_y_start, top_y_end)
-
-    # 2. Вирізаємо вузьку смужку знизу
-    strip_bottom = get_safe_strip(bottom_y_start, bottom_y_end)
-
-    # 3. Склеюємо
-    combined = np.vstack((strip_top, strip_bottom))
-    
-    return combined.tobytes()
-
-def calculate_hash(data_bytes):
-    return hashlib.md5(data_bytes).hexdigest()
-
 def get_image_links_headless():
+    """Запускає Chrome (Headless) і шукає картинки."""
     print("🚀 Selenium: Start...")
     chrome_options = Options()
     chrome_options.add_argument("--headless=new") 
@@ -99,6 +57,7 @@ def get_image_links_headless():
         images = driver.find_elements(By.TAG_NAME, "img")
         for img in images:
             src = img.get_attribute("src")
+            # Шукаємо все, що схоже на графік
             if src and (("GPV" in src) or ("media" in src and ("png" in src or "jpg" in src))):
                  found_urls.append(src)
     except Exception as e:
@@ -121,9 +80,13 @@ def parse_date_only(img):
     return None
 
 def analyze_schedule_image(img):
+    """
+    Аналізує графік і повертає СПИСОК ІНТЕРВАЛІВ та розмічену картинку.
+    """
     height, width, _ = img.shape
     debug_img = img.copy()
     rows_total = 12
+    # Координати
     top_y_start = int(height * 0.19)
     top_y_end = int(height * 0.51)
     bottom_y_start = int(height * 0.58)
@@ -148,6 +111,7 @@ def analyze_schedule_image(img):
             
             if y_center < height and x_center < width:
                 px = img[y_center, x_center]
+                # Перевірка на синій колір
                 is_blue = (LOWER_BLUE[0] <= px[0] <= UPPER_BLUE[0]) and \
                           (LOWER_BLUE[1] <= px[1] <= UPPER_BLUE[1]) and \
                           (LOWER_BLUE[2] <= px[2] <= UPPER_BLUE[2])
@@ -165,7 +129,24 @@ def analyze_schedule_image(img):
     scan_block(bottom_y_start, bottom_y_end, 12)
     return outage_intervals, debug_img
 
-def format_intervals(intervals):
+def format_intervals_to_string(intervals):
+    """
+    Перетворює список інтервалів у рядок для порівняння.
+    Приклад: "07:30-10:00|17:30-20:00"
+    """
+    if not intervals: return "CLEAR"
+    res = []
+    for start, end in intervals:
+        s_h, s_m = int(start), int((start - int(start)) * 60)
+        e_h, e_m = int(end), int((end - int(end)) * 60)
+        end_str = f"{e_h:02}:{e_m:02}" if e_h != 24 else "24:00"
+        res.append(f"{s_h:02}:{s_m:02}-{end_str}")
+    return "|".join(res)
+
+def format_intervals_pretty(intervals):
+    """
+    Гарний текст для повідомлення в Телеграм.
+    """
     if not intervals: return "✅ Світло є (або графік білий)."
     text = ""
     for start, end in intervals:
@@ -207,33 +188,41 @@ async def main():
     for url in urls:
         try:
             resp = requests.get(url, timeout=15)
-            img_bytes = bytearray(resp.content)
-            img_arr = np.asarray(img_bytes, dtype=np.uint8)
+            img_arr = np.asarray(bytearray(resp.content), dtype=np.uint8)
             img = cv2.imdecode(img_arr, cv2.IMREAD_COLOR)
             if img is None: continue
 
-            # 1. Дата
+            # 1. Визначаємо дату
             sched_date = parse_date_only(img)
-            if not sched_date: continue
+            if not sched_date: 
+                print(f"⚠️ Дата не прочиталась: {url}")
+                continue
             date_str = sched_date.strftime("%d.%m.%Y")
 
-            # 2. 🔥 СУПЕР-ТОЧНЕ ХЕШУВАННЯ
-            # Беремо тільки центр рядка 3.1 (+/- 3 пікселі)
-            queue_pixels = extract_queue_pixels(img)
-            current_hash = calculate_hash(queue_pixels)
+            # 2. АНАЛІЗУЄМО ГРАФІК (Отримуємо години відключення)
+            intervals, debug_img = await asyncio.to_thread(analyze_schedule_image, img)
+            
+            # 3. 🔥 СТВОРЮЄМО "ЦИФРОВИЙ ПІДПИС"
+            # Це буде рядок типу "07:30-10:00|17:30-20:00"
+            # Тільки якщо зміниться ЧАС, зміниться цей рядок.
+            current_signature = format_intervals_to_string(intervals)
+            
+            # 4. ПОРІВНЮЄМО З МИНУЛИМ ЗАПУСКОМ
+            last_saved_signature = history.get(date_str)
 
-            # 3. Перевірка
-            last_saved_hash = history.get(date_str)
-
-            if last_saved_hash == current_hash:
-                print(f"💤 {date_str} - без змін у 3.1")
+            if last_saved_signature == current_signature:
+                print(f"💤 Графік на {date_str} такий самий ({current_signature}).")
                 continue
             
-            status_text = "🔄 **ЗМІНИ В ГРАФІКУ!**" if last_saved_hash else "⚡️ **Новий графік**"
-            print(f"🔥 Виявлено зміни для 3.1 на {date_str}")
+            # Якщо підписи різні -> Є реальні зміни в годинах!
+            if last_saved_signature:
+                print(f"🔥 ЗМІНИ! Було: {last_saved_signature}, Стало: {current_signature}")
+                status_text = "🔄 **ЗМІНИ В ГРАФІКУ!**"
+            else:
+                print(f"✅ Знайдено новий графік на {date_str}")
+                status_text = "⚡️ **Новий графік**"
 
-            intervals, debug_img = await asyncio.to_thread(analyze_schedule_image, img)
-            text_schedule = format_intervals(intervals)
+            text_schedule = format_intervals_pretty(intervals)
             
             caption = (
                 f"{status_text}\n"
@@ -251,7 +240,8 @@ async def main():
                     parse_mode="Markdown"
                 )
                 
-                history[date_str] = current_hash
+                # Запам'ятовуємо новий підпис (години), а не хеш файлу
+                history[date_str] = current_signature
                 something_sent = True
 
         except Exception as e:
