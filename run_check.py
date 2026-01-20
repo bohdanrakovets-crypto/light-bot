@@ -37,41 +37,42 @@ STATE_FILE = "state.json"
 
 def extract_queue_pixels(img):
     """
-    Вирізає з картинки ТІЛЬКИ смужки, що стосуються черги 3.1.
-    Повертає байти цих смужок для хешування.
+    Вирізає ВУЗЬКУ безпечну смужку по центру рядка 3.1.
+    Ігнорує кордони та сусідні черги.
     """
     h, w, _ = img.shape
     rows_total = 12
     
-    # Координати блоків (ті самі, що в аналізі)
+    # Координати блоків
     top_y_start = int(h * 0.19)
     top_y_end = int(h * 0.51)
     
     bottom_y_start = int(h * 0.58)
     bottom_y_end = int(h * 0.90)
 
-    # 1. Вирізаємо смужку з верхнього блоку
-    t_block_h = top_y_end - top_y_start
-    t_row_h = t_block_h / rows_total
-    # Координати конкретного рядка
-    t_r_start = int(top_y_start + (TARGET_QUEUE_INDEX * t_row_h))
-    t_r_end = int(t_r_start + t_row_h)
-    
-    row_top = img[t_r_start:t_r_end, :]
+    # Функція для отримання безпечного центру
+    def get_safe_strip(y_start, y_end):
+        block_h = y_end - y_start
+        row_h = block_h / rows_total
+        
+        # Знаходимо точний центр рядка черги 3.1
+        center_y = int(y_start + (TARGET_QUEUE_INDEX * row_h) + (row_h / 2))
+        
+        # Беремо лише +/- 3 пікселі від центру (разом 6 пікселів висоти)
+        # Це гарантує, що ми не зачепимо сусідів
+        safe_margin = 3
+        return img[center_y - safe_margin : center_y + safe_margin, :]
 
-    # 2. Вирізаємо смужку з нижнього блоку
-    b_block_h = bottom_y_end - bottom_y_start
-    b_row_h = b_block_h / rows_total
-    b_r_start = int(bottom_y_start + (TARGET_QUEUE_INDEX * b_row_h))
-    b_r_end = int(b_r_start + b_row_h)
-    
-    row_bottom = img[b_r_start:b_r_end, :]
+    # 1. Вирізаємо вузьку смужку зверху
+    strip_top = get_safe_strip(top_y_start, top_y_end)
 
-    # 3. Склеюємо їх разом (вертикально)
-    combined_rows = np.vstack((row_top, row_bottom))
+    # 2. Вирізаємо вузьку смужку знизу
+    strip_bottom = get_safe_strip(bottom_y_start, bottom_y_end)
+
+    # 3. Склеюємо
+    combined = np.vstack((strip_top, strip_bottom))
     
-    # Повертаємо як набір байтів
-    return combined_rows.tobytes()
+    return combined.tobytes()
 
 def calculate_hash(data_bytes):
     return hashlib.md5(data_bytes).hexdigest()
@@ -206,32 +207,30 @@ async def main():
     for url in urls:
         try:
             resp = requests.get(url, timeout=15)
-            img_arr = np.asarray(bytearray(resp.content), dtype=np.uint8)
+            img_bytes = bytearray(resp.content)
+            img_arr = np.asarray(img_bytes, dtype=np.uint8)
             img = cv2.imdecode(img_arr, cv2.IMREAD_COLOR)
             if img is None: continue
 
             # 1. Дата
             sched_date = parse_date_only(img)
-            if not sched_date: 
-                print(f"⚠️ Дата не прочиталась: {url}")
-                continue
+            if not sched_date: continue
             date_str = sched_date.strftime("%d.%m.%Y")
 
-            # 2. 🔥 РОЗУМНЕ ХЕШУВАННЯ
-            # Вирізаємо ТІЛЬКИ вашу чергу і рахуємо її хеш
+            # 2. 🔥 СУПЕР-ТОЧНЕ ХЕШУВАННЯ
+            # Беремо тільки центр рядка 3.1 (+/- 3 пікселі)
             queue_pixels = extract_queue_pixels(img)
             current_hash = calculate_hash(queue_pixels)
 
-            # 3. Перевірка змін
+            # 3. Перевірка
             last_saved_hash = history.get(date_str)
 
             if last_saved_hash == current_hash:
-                print(f"💤 Графік 3.1 на {date_str} не змінився.")
+                print(f"💤 {date_str} - без змін у 3.1")
                 continue
             
-            # Якщо хеш змінився, значить пікселі у вашому рядку змінилися!
             status_text = "🔄 **ЗМІНИ В ГРАФІКУ!**" if last_saved_hash else "⚡️ **Новий графік**"
-            print(f"🔥 Зміни для черги 3.1 на {date_str}!")
+            print(f"🔥 Виявлено зміни для 3.1 на {date_str}")
 
             intervals, debug_img = await asyncio.to_thread(analyze_schedule_image, img)
             text_schedule = format_intervals(intervals)
