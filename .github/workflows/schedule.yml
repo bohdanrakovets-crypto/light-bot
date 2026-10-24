@@ -8,25 +8,33 @@ on:
 permissions:
   contents: write
 
+# Забороняє паралельний запуск двох копій бота одночасно
+concurrency:
+  group: check-schedule-group
+  cancel-in-progress: false
+
 jobs:
   run-bot:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
-
-      - name: Install Dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y tesseract-ocr libtesseract-dev
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.11'
+          cache: 'pip'
 
-      - name: Install Libraries
+      - name: Install System Dependencies
         run: |
+          sudo apt-get update
+          sudo apt-get install -y tesseract-ocr tesseract-ocr-ukr libtesseract-dev
+
+      - name: Install Python Libraries
+        run: |
+          pip install --upgrade pip
           pip install -r requirements.txt
 
       - name: Run Bot
@@ -39,6 +47,11 @@ jobs:
         run: |
           git config --global user.name "Bot"
           git config --global user.email "bot@github.com"
-          git add state.json || true
-          git commit -m "update history" || true
-          git push
+          if ! git diff --quiet state.json; then
+            git add state.json
+            git commit -m "chore: update schedule state [skip ci]"
+            git pull --rebase origin ${{ github.ref_name }}
+            git push
+          else
+            echo "Змін у state.json немає, пушити не треба."
+          fi
