@@ -4,6 +4,7 @@ import os
 import re
 from datetime import datetime
 from io import BytesIO
+from urllib.parse import urljoin
 
 import cv2
 import numpy as np
@@ -22,6 +23,22 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 GROUP_ID = os.getenv("GROUP_ID")
 SITE_URL = "https://voe-poweron.inneti.net/schedule_queues"
 
+API_URLS = [
+    "https://api-voe-poweron.inneti.net/api/options?option_key=pw_gpv_image_today",
+    "https://api-voe-poweron.inneti.net/api/options?option_key=pw_gpv_image_tomorrow",
+]
+
+BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "uk,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Origin": "https://voe-poweron.inneti.net",
+    "Referer": "https://voe-poweron.inneti.net/",
+}
+
 pytesseract.pytesseract.tesseract_cmd = "tesseract"
 
 # Межі синього кольору у форматі BGR
@@ -33,23 +50,68 @@ STATE_FILE = "state.json"
 MAX_HISTORY_DAYS = 60
 
 
-# --- ФУНКЦІЇ ---
+# --- ОТРИМАННЯ ПОСИЛАНЬ ---
+
+def _extract_urls_from_json(data) -> set[str]:
+    """Рекурсивно шукає посилання на картинки (.png/.jpg/.jpeg) у будь-якій структурі JSON."""
+    urls = set()
+    if isinstance(data, dict):
+        for v in data.values():
+            urls.update(_extract_urls_from_json(v))
+    elif isinstance(data, list):
+        for item in data:
+            urls.update(_extract_urls_from_json(item))
+    elif isinstance(data, str):
+        val = data.strip()
+        if any(ext in val.lower() for ext in (".png", ".jpg", ".jpeg")):
+            if val.startswith("http"):
+                urls.add(val)
+            elif val.startswith("/"):
+                # Якщо шлях відносний, доклеюємо домен API
+                urls.add(urljoin("https://api-voe-poweron.inneti.net", val))
+            else:
+                urls.add(urljoin("https://api-voe-poweron.inneti.net/", val))
+    return urls
+
+
+def get_image_links_via_api() -> tuple[list[str], bool]:
+    """
+    Швидке отримання картинок напряму через API (займає ~0.1 сек).
+    Повертає (список_url, чи_успішний_запит_до_API).
+    """
+    print("⚡ API: Перевірка графіків напряму...")
+    found_urls = set()
+    api_alive = False
+
+    with requests.Session() as session:
+        session.headers.update(BROWSER_HEADERS)
+        for api_url in API_URLS:
+            try:
+                resp = session.get(api_url, timeout=10)
+                if resp.status_code == 200:
+                    api_alive = True
+                    data = resp.json()
+                    extracted = _extract_urls_from_json(data)
+                    found_urls.update(extracted)
+                else:
+                    print(f"⚠️ API повернув статус {resp.status_code} для {api_url}")
+            except Exception as e:
+                print(f"⚠️ Помилка прямого API запиту: {e}")
+
+    return sorted(found_urls), api_alive
+
 
 def get_image_links_headless() -> list[str]:
-    """Запускає Chrome (Headless) і шукає посилання на картинки графіків."""
-    print("🚀 Selenium: Start...")
+    """Резервний варіант: запускає Chrome (Headless), якщо прямий API недоступний."""
+    print("🚀 Selenium (Fallback): Запуск браузера...")
     chrome_options = Options()
     chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--window-size=1920,1080")
-    chrome_options.add_argument(
-        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    )
+    chrome_options.add_argument(f"user-agent={BROWSER_HEADERS['User-Agent']}")
 
-    # Сучасний Selenium сам керує драйвером без webdriver-manager
     driver = webdriver.Chrome(options=chrome_options)
     found_urls = set()
 
@@ -57,11 +119,11 @@ def get_image_links_headless() -> list[str]:
         driver.set_page_load_timeout(30)
         driver.get(SITE_URL)
         try:
-            WebDriverWait(driver, 20).until(
+            WebDriverWait(driver, 15).until(
                 EC.presence_of_element_located((By.TAG_NAME, "img"))
             )
         except Exception:
-            print("⚠️ Час очікування завантаження тегів <img> вичерпано.")
+            pass
 
         images = driver.find_elements(By.TAG_NAME, "img")
         for img in images:
@@ -79,6 +141,22 @@ def get_image_links_headless() -> list[str]:
     return sorted(found_urls)
 
 
+def get_schedule_urls() -> list[str]:
+    """Спочатку пробує швидкий API, а якщо він заблокований/впав — вмикає Selenium."""
+    urls, api_alive = get_image_links_via_api()
+    if api_alive:
+        if urls:
+            print(f"✅ API: Знайдено картинок: {len(urls)}")
+        else:
+            print("📭 API працює штатно, але графіків на сайті зараз немає (порожня відповідь).")
+        return urls
+
+    print("🔄 API не відповів, перемикаюсь на резервний Selenium...")
+    return get_image_links_headless()
+
+
+# --- ОБРОБКА ЗОБРАЖЕНЬ ТА ІНТЕРВАЛІВ ---
+
 def parse_date_only(img: np.ndarray):
     """Витягує дату з шапки графіка за допомогою OCR."""
     try:
@@ -86,7 +164,7 @@ def parse_date_only(img: np.ndarray):
         header_crop = img[0 : int(h * 0.15), 0 : int(w * 0.55)]
         gray = cv2.cvtColor(header_crop, cv2.COLOR_BGR2GRAY)
         gray = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)[1]
-        
+
         try:
             text = pytesseract.image_to_string(gray, lang="ukr+eng")
         except pytesseract.TesseractError:
@@ -103,7 +181,7 @@ def parse_date_only(img: np.ndarray):
 
 def merge_intervals(intervals: list[tuple[float, float]]) -> list[tuple[float, float]]:
     """
-    Об'єднує суміжні або перекриті інтервали (наприклад, 11:00-12:00 та 12:00-13:00 -> 11:00-13:00).
+    Об'єднує суміжні або перекриті інтервали (11:00-12:00 та 12:00-13:00 -> 11:00-13:00).
     """
     if not intervals:
         return []
@@ -113,7 +191,6 @@ def merge_intervals(intervals: list[tuple[float, float]]) -> list[tuple[float, f
 
     for current_start, current_end in sorted_intervals[1:]:
         prev_start, prev_end = merged[-1]
-        # Допуск 1e-5 на випадок похибки float
         if current_start <= prev_end + 1e-5:
             merged[-1] = (prev_start, max(prev_end, current_end))
         else:
@@ -123,9 +200,7 @@ def merge_intervals(intervals: list[tuple[float, float]]) -> list[tuple[float, f
 
 
 def analyze_schedule_image(img: np.ndarray):
-    """
-    Аналізує графік і повертає склеєний список інтервалів та розмічену картинку.
-    """
+    """Аналізує графік і повертає склеєний список інтервалів та розмічену картинку."""
     height, width, _ = img.shape
     debug_img = img.copy()
     rows_total = 12
@@ -153,7 +228,6 @@ def analyze_schedule_image(img: np.ndarray):
             cv2.circle(debug_img, (x_center, y_center), 2, (0, 0, 255), -1)
 
             if 1 <= y_center < height - 1 and 1 <= x_center < width - 1:
-                # Беремо патч 3x3 пікселі замість одного, щоб уникнути артефактів стиснення
                 patch = img[y_center - 1 : y_center + 2, x_center - 1 : x_center + 2]
                 px = np.median(patch, axis=(0, 1))
 
@@ -178,7 +252,6 @@ def analyze_schedule_image(img: np.ndarray):
     scan_block(top_y_start, top_y_end, 0)
     scan_block(bottom_y_start, bottom_y_end, 12)
 
-    # Склеюємо інтервали на стику 12:00 (і будь-які інші сусідні)
     merged_intervals = merge_intervals(raw_intervals)
     return merged_intervals, debug_img
 
@@ -192,7 +265,6 @@ def _float_to_time_str(val: float, is_end: bool = False) -> str:
 
 
 def format_intervals_to_string(intervals: list[tuple[float, float]]) -> str:
-    """Перетворює список інтервалів у рядок підпису для state.json."""
     if not intervals:
         return "CLEAR"
     res = [
@@ -203,7 +275,6 @@ def format_intervals_to_string(intervals: list[tuple[float, float]]) -> str:
 
 
 def format_intervals_pretty(intervals: list[tuple[float, float]]) -> str:
-    """Гарний текст для повідомлення в Телеграм."""
     if not intervals:
         return "✅ Світло є (весь день без відключень)."
     lines = [
@@ -214,10 +285,6 @@ def format_intervals_pretty(intervals: list[tuple[float, float]]) -> str:
 
 
 def normalize_signature_str(sig: str) -> str:
-    """
-    Нормалізує старі записи у state.json (склеює '11:00-12:00|12:00-13:00' -> '11:00-13:00'),
-    щоб уникнути хибних спрацювань після оновлення коду.
-    """
     if not sig or sig == "CLEAR" or "|" not in sig:
         return sig
     try:
@@ -244,7 +311,6 @@ def load_state() -> dict:
 
 
 def save_state(state: dict):
-    """Сортує історію за датою, залишає останні MAX_HISTORY_DAYS записів і зберігає у файл."""
     def parse_key(k):
         try:
             return datetime.strptime(k, "%d.%m.%Y")
@@ -268,18 +334,15 @@ async def main():
 
     bot = Bot(token=BOT_TOKEN)
     try:
-        urls = await asyncio.to_thread(get_image_links_headless)
+        urls = await asyncio.to_thread(get_schedule_urls)
         if not urls:
-            print("❌ Картинок не знайдено.")
             return
 
         history = load_state()
         state_changed = False
 
         with requests.Session() as session:
-            session.headers.update(
-                {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-            )
+            session.headers.update(BROWSER_HEADERS)
 
             for url in urls:
                 try:
