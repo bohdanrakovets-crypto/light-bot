@@ -1,7 +1,6 @@
 aiogram==3.10.0
-requests
-numpy
-opencv-python-headless
-pytesseract
-selenium
-webdriver-manager
+requests>=2.31.0
+numpy>=1.26.0
+opencv-python-headless>=4.9.0.80
+pytesseract>=0.3.10
+selenium>=4.20.0
