@@ -8,14 +8,18 @@ on:
 permissions:
   contents: write
 
-# Забороняє паралельний запуск двох копій бота одночасно
+# Прибирає ворнінг про примусовий перехід на Node.js 24
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 concurrency:
   group: check-schedule-group
   cancel-in-progress: false
 
 jobs:
   run-bot:
-    runs-on: ubuntu-latest
+    # Фіксуємо стабільну версію замість ubuntu-latest, щоб прибрати Notice і уникнути сюрпризів міграції
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Checkout code
@@ -24,7 +28,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.12'
           cache: 'pip'
 
       - name: Install System Dependencies
